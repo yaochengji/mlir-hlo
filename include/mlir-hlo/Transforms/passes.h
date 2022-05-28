@@ -35,6 +35,10 @@ namespace bufferization {
 class BufferizeTypeConverter;
 }  // namespace bufferization
 
+namespace shape {
+class ShapeDialect;
+} // namespace shape
+
 using BufferizeDialectsCallback = std::function<void(DialectRegistry&)>;
 using BufferizePatternsCallback = std::function<void(
     ConversionTarget&, MLIRContext*, bufferization::BufferizeTypeConverter*,
@@ -63,6 +67,9 @@ std::unique_ptr<OperationPass<func::FuncOp>> createTestUserangePass();
 /// Creates a pass that prints the analysis results of ShapeComponentsAnalysis.
 std::unique_ptr<OperationPass<func::FuncOp>>
 createTestShapeComponentAnalysisPass();
+
+/// Creates a pass that prints the analysis results of SymbolicShapeAnalysis.
+std::unique_ptr<OperationPass<ModuleOp>> createTestSymbolicShapeAnalysisPass();
 
 /// Creates a pass that removes redundant operations that implement a
 /// CopyOpInterface.
