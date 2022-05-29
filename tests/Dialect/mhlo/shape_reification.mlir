@@ -66,6 +66,29 @@ func.func @move_shape_of_into_assuming(%arg0 : !shape.witness,
 
 // -----
 
+// CHECK-LABEL: @infer_shape_using_dim_op
+func.func @infer_shape_using_dim_op(%arg0: tensor<?x4xf32>, %arg1: tensor<?x4xf32>, %arg2: tensor<4x4xf32>) -> !shape.shape {
+  %0 = mhlo.add %arg0, %arg1 : tensor<?x4xf32>
+  %1 = "mhlo.dot_general"(%0, %arg2) {
+    dot_dimension_numbers = #mhlo.dot<
+      lhs_contracting_dimensions = [1],
+      rhs_contracting_dimensions = [0]
+    >,
+   precision_config = [#mhlo<"precision DEFAULT">, #mhlo<"precision DEFAULT">]
+  } : (tensor<?x4xf32>, tensor<4x4xf32>) -> tensor<?x4xf32>
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C4:.*]] = arith.constant 4 : index
+  // CHECK-DAG: %[[SHAPE0:.*]] = shape.shape_of %arg0 : tensor<?x4xf32> -> tensor<2xindex>
+  // CHECK-DAG: %[[DIM0:.*]] = tensor.extract %[[SHAPE0]][%[[C0]]] : tensor<2xindex>
+  // CHECK-DAG: %[[SHAPE:.*]] = tensor.from_elements %[[DIM0]], %[[C4]] : tensor<2xindex>
+  %2 = shape.shape_of %1 : tensor<?x4xf32> -> tensor<2xindex>
+  // CHECK-DAG: %[[V0:.*]] = shape.value_as_shape %[[SHAPE]] : tensor<2xindex> -> !shape.shape
+  %3 = shape.value_as_shape %2 : tensor<2xindex> -> !shape.shape
+  return %3 : !shape.shape
+}
+
+// -----
+
 // CHECK-LABEL: @tree_conjunction
 // CHECK-SAME:  %[[ARG0:.*]]: tensor<?xi1>, %[[ARG1:.*]]: tensor<?xi1>, %[[ARG2:.*]]: tensor<?xi1>, %[[ARG3:.*]]: tensor<?xi1>
 func.func @tree_conjunction(%arg0: tensor<?xi1>, %arg1: tensor<?xi1>, 

@@ -98,6 +98,12 @@ def TestShapeComponentAnalysis : Pass<"test-print-shape-components",
   let constructor = "createTestShapeComponentAnalysisPass()";
 }
 
+def TestSymbolicShapeAnalysis : Pass<"test-print-symbolic-shape",
+                                      "ModuleOp"> {
+  let summary = "Test pass for analyzing symbolic shape infomation.";
+  let constructor = "createTestSymbolicShapeAnalysisPass()";
+}
+
 def LowerIndexCastPass
     : Pass<"lower-index-cast", "mlir::func::FuncOp"> {
   let summary = "Lower index cast on tensors to tensor dialect";

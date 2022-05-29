@@ -1,6 +1,7 @@
 add_mlir_library(MLIRHLOAnalysis
   shape_component_analysis.cc
   userange_analysis.cc
+  symbolic_shape_analysis.cc
 
   DEPENDS
   mlir-headers
@@ -12,10 +13,12 @@ add_mlir_library(MLIRHLOAnalysis
 
 add_mlir_library(MLIRHLOTestAnalysis
   test_shape_component_analysis.cc
+  test_symbolic_shape_analysis.cc
   test_userange_analysis.cc
 
   DEPENDS
   LMHLOTransformsPassIncGen
+  MhloPasses
 
   LINK_COMPONENTS
   Core
@@ -23,6 +26,7 @@ add_mlir_library(MLIRHLOTestAnalysis
   LINK_LIBS PUBLIC
   LmhloDialect
   LmhloGPUDialect
+  MhloPasses
   MLIRHLOAnalysis
   MLIRAnalysis
   MLIRPass

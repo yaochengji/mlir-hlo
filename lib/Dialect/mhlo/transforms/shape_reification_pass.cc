@@ -17,8 +17,6 @@ limitations under the License.
 #include <memory>
 #include <utility>
 
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
 #include "mlir-hlo/Dialect/mhlo/transforms/PassDetail.h"
 #include "mlir-hlo/Dialect/mhlo/transforms/passes.h"
 #include "mlir-hlo/Dialect/mhlo/transforms/rewriters.h"
@@ -27,10 +25,41 @@ limitations under the License.
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace mhlo {
 namespace {
+
+struct ShapeReificationOnTensorDimPattern : public OpRewritePattern<tensor::DimOp> {
+  explicit ShapeReificationOnTensorDimPattern(MLIRContext *ctx)
+      : OpRewritePattern<tensor::DimOp>(ctx) {
+    // Recursively reify until we hit an op that doesn't support it.
+    setHasBoundedRewriteRecursion();
+  }
+
+  LogicalResult matchAndRewrite(tensor::DimOp op,
+                                PatternRewriter &rewriter) const override {
+    auto origin = op.source().getDefiningOp<InferShapedTypeOpInterface>();
+    if (!origin) return failure();
+    SmallVector<Value, 1> reifications;
+    if (failed(origin.reifyReturnTypeShapes(rewriter, origin->getOperands(),
+                                            reifications))) {
+      return failure();
+    }
+    Value shape = reifications[op.source().cast<OpResult>().getResultNumber()];
+    Value dimOfShape = rewriter.create<tensor::ExtractOp>(op.getLoc(), shape, op.index());    
+
+    // Insert cast, if needed.
+    if (dimOfShape.getType() != op.getType()) {
+      dimOfShape = rewriter.create<tensor::CastOp>(op.getLoc(), op.getType(), dimOfShape);
+    }
+
+    rewriter.replaceOp(op, dimOfShape);
+    return success();
+  }
+};
 
 struct ShapeReificationPattern : public OpRewritePattern<shape::ShapeOfOp> {
   explicit ShapeReificationPattern(MLIRContext *ctx)
@@ -181,6 +210,7 @@ void PopulateShapeReificationPatterns(MLIRContext *ctx,
   // clang-format off
   patterns->add<
       ShapeReificationPattern,
+      ShapeReificationOnTensorDimPattern,
       ShapeReificationThroughAssumingOpsPattern>(ctx);
   // clang-format on
 }
