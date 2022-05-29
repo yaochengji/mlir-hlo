@@ -38,7 +38,7 @@ namespace mlir {
 //   %0 = mhlo.add %arg0, %arg1 : tensor<?x2xf32>
 //   return %0 : tensor<?x12xf32>
 // }
-// Then the created auxilary shape infer will be
+// Then the created auxiliary shape infer will be
 // func.func private @_shape_infer_simple(%arg0: tensor<?x4xf32>, %arg1: tensor<?x4xf32>) -> (!shape.shape, tensor<?x4xf32>)  {
 //   %0 = mhlo.add %arg0, %arg1 : tensor<?x4xf32>
 //   %1 = shape.shape_of %arg0 : tensor<?x4xf32> -> tensor<2xindex>  %2 = shape.value_as_shape %1 : tensor<2xindex> -> !shape.shape
@@ -54,14 +54,19 @@ public:
   /// Delete all auxiliary function in destructor
   virtual ~SymbolicShapeAnalysis() {
     SymbolTable symbolTable = SymbolTable(moduleOp_);
-    for (StringAttr symbol : insertedSymbols_) {
-      Operation *op = symbolTable.lookup(symbol);
-      assert(op);
-      op->erase();
+    for (auto it : originalFuncToAuxiliary_) {
+      func::FuncOp auxiliaryFunc = it.second;
+      symbolTable.erase(auxiliaryFunc);
     }
   }
 
+  // Get the symbolic value in auxiliary shape infer function for v in an
+  // original function.
   Value getSymbolicShape(Value v);
+
+  // Construct and get a symbolic sources set for every intermediate values in
+  // the original functions.
+  DenseMap<Value, DenseSet<Value>> constructSymbolicExprSourcesTable();
 
   /// Dumps the symbolic shape information to the given stream.
   void dump(raw_ostream &os);
@@ -70,12 +75,16 @@ private:
   void createAuxiliarySymbolicShapeFunc();
   void constructSymbolicShapeTable(func::FuncOp originalFunc,
                                    func::FuncOp symbolicShapeInferFunc);
+  DenseSet<Value> findSymbolicExprSourcesRecursively(
+      Value symbolicShape,
+      DenseMap<Value, DenseSet<Value>> &symbolicShapeFnCache,
+      const DenseMap<Value, Value> &auxiValToOrigin);
 
   ModuleOp moduleOp_;
-  SmallVector<StringAttr> insertedSymbols_;
+  SmallVector<std::pair<func::FuncOp, func::FuncOp>> originalFuncToAuxiliary_;
 
   // A table mapping value in original function to symbolic shape in
-  // corresponding auxilary shape infer function. The symbolic shape is stored
+  // corresponding auxiliary shape infer function. The symbolic shape is stored
   // as an pointer to an OpOperand of the terminator in case other intermediate
   // ops be modified after some passes.
   DenseMap<Value, OpOperand *> symbolisShapeTable_;

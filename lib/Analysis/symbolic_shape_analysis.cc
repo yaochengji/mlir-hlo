@@ -16,6 +16,7 @@ limitations under the License.
 #include "mlir-hlo/Analysis/symbolic_shape_analysis.h"
 #include "mlir-hlo/Dialect/mhlo/transforms/passes.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -25,9 +26,19 @@ limitations under the License.
 using namespace llvm;
 using namespace mlir;
 
+#define DEBUG_TYPE "symbolic-shape-analysis"
+
 namespace {
 
 constexpr StringRef getSymbolicShapeFuncAttrName() { return "auxiliary_of"; }
+
+Value getArgIfIsAValueAsShapeOp(Value v) {
+  Operation *defOp = v.getDefiningOp();
+  if (auto valueAsShapeOp = dyn_cast_or_null<shape::ValueAsShapeOp>(defOp)) {
+    return valueAsShapeOp.getArg();
+  }
+  return v;
+}
 
 } // namespace
 
@@ -80,8 +91,7 @@ void SymbolicShapeAnalysis::createAuxiliarySymbolicShapeFunc() {
     shpFuncOp.setPrivate();
     shpFuncOp->setAttr(getSymbolicShapeFuncAttrName(),
                        builder.getStringAttr(funcSymName));
-    StringAttr insertedSymbol = symbolTable.insert(shpFuncOp);
-    insertedSymbols_.push_back(insertedSymbol);
+    symbolTable.insert(shpFuncOp);
     shpFuncOps.push_back(shpFuncOp);
 
     // add the body of the auxiliary shape infer func
@@ -111,10 +121,11 @@ void SymbolicShapeAnalysis::createAuxiliarySymbolicShapeFunc() {
     allResults.append(valResults);
     builder.create<func::ReturnOp>(builder.getUnknownLoc(), allResults);
 
+    originalFuncToAuxiliary_.push_back({funcOp, shpFuncOp});
     constructSymbolicShapeTable(funcOp, shpFuncOp);
   }
 
-  // run shape reification pass on all the auxilary functions
+  // run shape reification pass on all the auxiliary functions
   PassManager pm(moduleOp_->getContext(), func::FuncOp::getOperationName());
   pm.addPass(mhlo::CreateShapeReificationPass());
   pm.addPass(createCSEPass());
@@ -133,27 +144,124 @@ Value SymbolicShapeAnalysis::getSymbolicShape(Value v) {
     return {};
   }
   OpOperand *operand = iter->second;
-  return operand->get();
+  return getArgIfIsAValueAsShapeOp(operand->get());
+}
+
+llvm::DenseSet<Value> SymbolicShapeAnalysis::findSymbolicExprSourcesRecursively(
+    Value symbolicShape,
+    llvm::DenseMap<Value, llvm::DenseSet<Value>> &symbolicShapeFnCache,
+    const llvm::DenseMap<Value, Value> &auxiValToOrigin) {
+  auto resIter = symbolicShapeFnCache.find(symbolicShape);
+  if (resIter != symbolicShapeFnCache.end())
+    return resIter->second;
+
+  llvm::DenseSet<Value> result;
+
+  Operation *defOp = symbolicShape.getDefiningOp();
+  // FIXME: is checking tensor.dim and shape.shape_of here correct and enough?
+  if (!defOp) {
+    if (auto arg = auxiValToOrigin.lookup(symbolicShape))
+      result.insert(arg);
+  } else if (auto dimOp = dyn_cast<tensor::DimOp>(defOp)) {
+    if (auto originVal = auxiValToOrigin.lookup(dimOp.source()))
+      result.insert(originVal);
+  } else if (auto shapeOfOp = dyn_cast<shape::ShapeOfOp>(defOp)) {
+    if (auto originVal = auxiValToOrigin.lookup(shapeOfOp.getArg()))
+      result.insert(originVal);
+  } else {
+    for (Value inp : defOp->getOperands()) {
+      llvm::DenseSet<Value> subSources = findSymbolicExprSourcesRecursively(
+          inp, symbolicShapeFnCache, auxiValToOrigin);
+      for (Value sV : subSources)
+        result.insert(sV);
+    }
+  }
+  symbolicShapeFnCache[symbolicShape] = result;
+
+  // clang-format off
+  LLVM_DEBUG(llvm::dbgs() << "intermidiate result in symbolicShapeFnCache: "
+                          << symbolicShape << "\n";
+             for (Value r : result)
+               llvm::dbgs() << r << "\n";);
+  // clang-format on
+
+  return result;
+}
+
+llvm::DenseMap<Value, llvm::DenseSet<Value>>
+SymbolicShapeAnalysis::constructSymbolicExprSourcesTable() {
+  llvm::DenseMap<Value, llvm::DenseSet<Value>> result;
+
+  for (auto it : originalFuncToAuxiliary_) {
+    func::FuncOp originalFunc = it.first;
+    func::FuncOp auxiliaryFunc = it.second;
+    llvm::DenseMap<Value, Value> auxiValToOrigin;
+    llvm::DenseMap<Value, llvm::DenseSet<Value>> symbolicShapeFnCache;
+
+    unsigned valCnt = 0;
+    Operation *auxiTerminator = auxiliaryFunc.getBody().front().getTerminator();
+    unsigned numOfAuxiliaryResult = auxiTerminator->getNumOperands();
+    assert(numOfAuxiliaryResult % 2 == 0);
+    unsigned halfOfNumAuxiliaryResult = numOfAuxiliaryResult / 2;
+    for (auto &op : originalFunc.getBody().front().without_terminator()) {
+      for (Value v : op.getResults()) {
+        Value auxiVal =
+            auxiTerminator->getOperand(halfOfNumAuxiliaryResult + valCnt);
+        valCnt++;
+        auxiValToOrigin[auxiVal] = v;
+      }
+    }
+
+    for (auto it :
+         zip(originalFunc.getArguments(), auxiliaryFunc.getArguments())) {
+      auxiValToOrigin[std::get<1>(it)] = std::get<0>(it);
+    }
+
+    for (auto &op : originalFunc.getBody().front().without_terminator()) {
+      for (Value v : op.getResults()) {
+        Value symbolicShape = getSymbolicShape(v);
+        llvm::DenseSet<Value> sources = findSymbolicExprSourcesRecursively(
+            symbolicShape, symbolicShapeFnCache, auxiValToOrigin);
+        result[v] = sources;
+      }
+    }
+  }
+  return result;
 }
 
 void SymbolicShapeAnalysis::dump(raw_ostream &os) {
   SymbolTable symbolTable = SymbolTable(moduleOp_);
-  for (StringAttr symbol : insertedSymbols_) {
-    Operation *op = symbolTable.lookup(symbol);
-    assert(op);
-    StringAttr originalSymbol =
-        op->getAttrOfType<StringAttr>(getSymbolicShapeFuncAttrName());
-    auto originalFunc = cast<func::FuncOp>(symbolTable.lookup(originalSymbol));
+  llvm::DenseMap<Value, llvm::DenseSet<Value>> sourcesTable =
+      constructSymbolicExprSourcesTable();
+  for (auto it : originalFuncToAuxiliary_) {
+    func::FuncOp originalFunc = it.first;
+    func::FuncOp auxiliaryFunc = it.second;
 
-    os << "============= auxilary shape function for @"
-       << originalSymbol.strref() << " =============\n";
-    os << *op << "\n\n";
+    os << "============= auxiliary shape function for @"
+       << originalFunc.getSymName() << " =============\n";
+    os << auxiliaryFunc << "\n\n";
 
-    os << "============= symbolic shape table =============\n";
+    os << "============= symbolic shape table for @"
+       << originalFunc.getSymName() << " =============\n";
     for (auto &op : originalFunc.getBody().front().without_terminator()) {
       for (Value v : op.getResults()) {
         os << "original value: " << v << "\n";
         os << "symblic shape: " << getSymbolicShape(v) << "\n";
+        os << "\n";
+      }
+    }
+    os << "\n";
+
+    os << "============= symbolic expr sources table for @"
+       << originalFunc.getSymName() << " =============\n";
+    for (auto &op : originalFunc.getBody().front().without_terminator()) {
+      for (Value v : op.getResults()) {
+        os << "original value: " << v << "\n";
+        os << "symblic shape sources: \n";
+        for (Value source : sourcesTable[v]) {
+          os << source << "\n";
+        }
+        os << "\n";
       }
     }
     os << "\n";
